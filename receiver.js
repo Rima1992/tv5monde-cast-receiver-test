@@ -25,7 +25,7 @@
   }
 
   function warn(msg) {
-    console.warn(TAG + ' ' + msg);
+    console.log(TAG + ' ' + msg);
   }
 
   // ── Accès au Cast SDK ────────────────────────────────────────────────────────
