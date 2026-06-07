@@ -22,9 +22,7 @@
   var castContext   = cast.framework.CastReceiverContext.getInstance();
   var playerManager = castContext.getPlayerManager();
 
-  // ── 1. LOAD interceptor : lire le token depuis customData ─────────────────
-  // Android envoie le token via GoogleCastMediaInfoConfig.customData
-  // (buildNagraReceiverConfig() dans PlayerManager)
+  // ── 1. LOAD interceptor : lire le token depuis customData ────────────────
   playerManager.setMessageInterceptor(
     cast.framework.messages.MessageType.LOAD,
     function (request) {
@@ -32,9 +30,9 @@
       try {
         var customData = request.media && request.media.customData;
 
-        // Le token peut arriver comme string JSON ou comme objet déjà parsé
+        // Le token peut arriver comme string JSON ou objet déjà parsé
         if (typeof customData === 'string') {
-          try { customData = JSON.parse(customData); } catch(e) {}
+          try { customData = JSON.parse(customData); } catch (e) {}
         }
 
         if (customData && typeof customData['nv-authorizations'] === 'string') {
@@ -51,44 +49,7 @@
     }
   );
 
-  // ── 2. setMediaPlaybackInfoHandler : injecter le header Widevine ──────────
-  // C'est ICI que le DRM est configuré pour la lecture — pas dans preprocessHttpRequest.
-  // setMediaPlaybackInfoHandler est appelé juste avant que le player démarre le stream.
-  playerManager.setMediaPlaybackInfoHandler(function (loadRequest, playbackConfig) {
-    log('setMediaPlaybackInfoHandler appelé');
-
-    // Double-check : relire customData si le token n'a pas été capté dans LOAD
-    try {
-      var customData = loadRequest.media && loadRequest.media.customData;
-      if (typeof customData === 'string') {
-        try { customData = JSON.parse(customData); } catch(e) {}
-      }
-      if (!nagraToken && customData && customData['nv-authorizations']) {
-        nagraToken = customData['nv-authorizations'];
-        log('Token Nagra récupéré dans PlaybackInfoHandler ✅');
-      }
-    } catch(e) {}
-
-    if (nagraToken) {
-      // licenseRequestHandler est appelé à chaque requête vers le license server Nagra
-      playbackConfig.licenseRequestHandler = function (requestInfo) {
-        requestInfo.headers = requestInfo.headers || {};
-        requestInfo.headers['nv-authorizations'] = nagraToken;
-        requestInfo.headers['Accept']            = 'application/octet-stream';
-        requestInfo.headers['Content-Type']      = 'application/octet-stream';
-        log('Header nv-authorizations injecté ✅');
-        return requestInfo;
-      };
-      log('licenseRequestHandler configuré avec token Nagra');
-    } else {
-      warn('Aucun token Nagra disponible au moment de la lecture');
-    }
-
-    return playbackConfig;
-  });
-
-  // ── 3. Custom message listener : refresh du token via sendMessage ──────────
-  // Android envoie le token via BitmovinCastManager.sendMessage() après CastStarted
+  // ── 2. Custom message listener : token envoyé depuis Android ────────────
   castContext.addCustomMessageListener(
     BITMOVIN_NAMESPACE,
     function (event) {
@@ -108,12 +69,39 @@
     }
   );
 
-  // ── 4. Démarrage du receiver Google CAF ───────────────────────────────────
-  // PAS de bitmovin.player.cast.Receiver ici — on utilise le player natif du Chromecast
-  castContext.start({
-    queue: new cast.framework.QueueManager(),
-  });
+  // ── 3. Config Bitmovin : injecter le token Nagra dans les requêtes DRM ──
+  var playerConfig = {
+    key: '847c83e1-cf03-4562-a258-e7f43b7a76a9',
+    network: {
+      preprocessHttpRequest: function (type, request) {
+        // 'widevine' = requête vers le license server Nagra
+        if (type === 'widevine') {
+          if (nagraToken) {
+            request.headers = request.headers || {};
+            request.headers['nv-authorizations'] = nagraToken;
+            request.headers['Accept']            = 'application/octet-stream';
+            request.headers['Content-Type']      = 'application/octet-stream';
+            log('Header nv-authorizations injecté dans la requête Widevine ✅');
+          } else {
+            warn('Requête Widevine sans token Nagra — live DRM ne fonctionnera pas');
+          }
+        }
+        return request;
+      }
+    }
+  };
 
-  log('Google CAF Receiver démarré ✅ (mode natif, sans SDK Bitmovin JS)');
+  // ── 4. Démarrage du receiver Bitmovin CAF ────────────────────────────────
+  // bitmovin.player.cast.Receiver est disponible car bitmovinplayer.js est chargé
+  try {
+    var receiver = bitmovin.player.cast.Receiver.create(playerConfig, castContext);
+    receiver.init();
+    log('Bitmovin CAF Receiver démarré ✅');
+  } catch (e) {
+    warn('Erreur démarrage Bitmovin receiver: ' + e.message);
+    // Fallback : démarrer le receiver Google natif si Bitmovin échoue
+    log('Fallback vers Google CAF natif');
+    castContext.start();
+  }
 
 })();
