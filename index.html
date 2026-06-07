@@ -4,62 +4,24 @@
   <meta charset="utf-8"/>
   <title>TV5Monde+ Cast Receiver</title>
 
-  <!--
-    Seul SDK nécessaire : le Cast Receiver Framework (Google).
-    Le player Chromecast gère nativement DASH + Widevine.
-    On n'a PAS besoin du SDK Bitmovin ici — le Chromecast joue
-    le flux directement via son propre moteur de lecture.
-  -->
+  <!-- 1. SDK Google CAF (obligatoire, doit être en premier) -->
   <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+
+  <!-- 2. SDK Bitmovin CAF Receiver (obligatoire pour utiliser bitmovin.player.cast.Receiver) -->
+  <script src="//cdn.bitmovin.com/player/web/8/bitmovinplayer.js"></script>
 
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-
-    body {
-      background: #000;
-      color: #fff;
-      font-family: sans-serif;
-      overflow: hidden;
-      width: 100vw;
-      height: 100vh;
-    }
-
-    /* Le CAF gère l'affichage vidéo automatiquement.
-       cast-media-player est le composant Web officiel de Google. */
+    body { background: #000; color: #fff; font-family: sans-serif;
+           overflow: hidden; width: 100vw; height: 100vh; }
     cast-media-player {
-      width: 100%;
-      height: 100%;
-      display: block;
-      --theme-hue: 0;
-      --progress-color: #e50000;
-      --splash-image: none;
-    }
-
-    /* Overlay de debug — visible uniquement en test (console Chrome inspect) */
-    #debug {
-      position: fixed;
-      top: 12px;
-      left: 12px;
-      background: rgba(0,0,0,.75);
-      color: #0f0;
-      font-family: monospace;
-      font-size: 11px;
-      padding: 8px 12px;
-      border-radius: 4px;
-      z-index: 9999;
-      max-width: 500px;
-      word-break: break-all;
-      display: none; /* mettre 'block' pour debug */
+      width: 100%; height: 100%; display: block;
+      --theme-hue: 0; --progress-color: #e50000; --splash-image: none;
     }
   </style>
 </head>
 <body>
-
   <cast-media-player></cast-media-player>
-  <div id="debug"></div>
-
-  <!-- Notre logique receiver : gestion Nagra DRM + token Bitmovin -->
   <script src="receiver.js"></script>
-
 </body>
 </html>
