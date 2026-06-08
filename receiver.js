@@ -136,7 +136,7 @@
     log('MEDIA_STATUS state=' + (e.mediaStatus && e.mediaStatus.playerState));
   });
 
-  // ─── Démarrage obligatoire ────────────────────────────────────────────────
+  // ─── Démarrage obligatoire  ────────────────────────────────────────────────
   castContext.start();
   log('started');
 
