@@ -36,8 +36,6 @@
     return requestInfo;
   };
 
-  castContext.setOptions({ playbackConfig: playbackConfig });
-
   // ─── LOAD interceptor ─────────────────────────────────────────────────────
   playerManager.setMessageInterceptor(
     cast.framework.messages.MessageType.LOAD,
@@ -136,8 +134,9 @@
     log('MEDIA_STATUS state=' + (e.mediaStatus && e.mediaStatus.playerState));
   });
 
-  // ─── Démarrage obligatoire  ────────────────────────────────────────────────
-  castContext.start();
+  // ─── Démarrage obligatoire ────────────────────────────────────────────────
+  // playbackConfig passé ici — c'est la seule façon correcte dans CAFv3
+  castContext.start({ playbackConfig: playbackConfig });
   log('started');
 
 })();
