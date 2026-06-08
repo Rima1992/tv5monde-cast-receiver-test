@@ -1,132 +1,153 @@
 /**
- * TV5Monde+ — Custom CAFv3 Receiver
+ * TV5Monde+ — CAFv3 Receiver
  *
- * Architecture CAFv3 :
- *   - Le player côté RECEIVER est le player natif Google (Shaka).
- *     Bitmovin Player NE TOURNE PAS ici — il tourne côté sender (Android/iOS).
- *   - Ce receiver gère :
- *       1. L'injection du token Nagra dans les requêtes de licence Widevine
- *          via la Network API CAFv3 (setRequestHandler)
- *       2. La réception du token via customData (LOAD) et via custom messages
- *          (refresh toutes les ~4 min)
+ * Gère 3 types de contenu :
  *
- * Ref Bitmovin : https://developer.bitmovin.com/playback/docs/caf-support
- * Ref Google   : https://developers.google.com/cast/docs/web_receiver/basic
+ *   1. HLS + Widevine (DRM Nagra)
+ *      - drmConfig présent côté sender
+ *      - token nv-authorizations injecté dans customData par buildNagraReceiverConfig()
+ *      - injecté dans chaque requête de licence via setNetworkRequestHandler(LICENSE)
+ *
+ *   2. HLS sans Widevine — live (ex: channel(orient)/variant.m3u8)
+ *      - pas de DRM, mais streamType DOIT être LIVE sinon Shaka échoue
+ *      - Bitmovin SDK ne set pas liveConfig → MediaInfo arrive avec streamType=BUFFERED
+ *      - détecté via customData['isLive'] + patterns URL + streamType déjà LIVE
+ *
+ *   3. HLS sans Widevine — VOD
+ *      - pas de DRM, pas de live → lecture directe par Shaka sans modification
  */
 
 (function () {
   'use strict';
 
-  var TAG = '[TV5Monde Receiver]';
+  var TAG = '[TV5Monde+]';
 
-  /**
-   * Namespace Bitmovin — doit correspondre à PlayerCastManager.BITMOVIN_CAST_NAMESPACE
-   * côté Android : "urn:x-cast:com.bitmovin.player.caf"
-   */
   var BITMOVIN_NAMESPACE = 'urn:x-cast:com.bitmovin.player.caf';
 
-  /** Token Nagra courant — mis à jour via LOAD interceptor ou sendMessage */
   var nagraToken = null;
 
-  function log(msg) { console.log(TAG + ' ' + msg); }
+  function log(msg)  { console.log(TAG  + ' ' + msg); }
   function warn(msg) { console.warn(TAG + ' ' + msg); }
 
-  // ── Accès au Cast SDK ────────────────────────────────────────────────────────
   var castContext   = cast.framework.CastReceiverContext.getInstance();
   var playerManager = castContext.getPlayerManager();
 
-  // ════════════════════════════════════════════════════════════════════════════
-  // 1. LOAD interceptor
-  //    Le sender Bitmovin (Android/iOS) place le token dans request.media.customData
-  //    Format attendu : { "nv-authorizations": "<token>" }
-  // ════════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════
+  // LOAD interceptor — exécuté à chaque nouvelle source
+  // ═══════════════════════════════════════════════════════════
   playerManager.setMessageInterceptor(
     cast.framework.messages.MessageType.LOAD,
     function (request) {
-      log('LOAD interceptor — analyse du customData');
+      log('--- LOAD ---');
 
       try {
-        var customData = request.media && request.media.customData;
-        if (customData && typeof customData['nv-authorizations'] === 'string') {
-          nagraToken = customData['nv-authorizations'];
-          log('Token Nagra recu via customData ✅ longueur=' + nagraToken.length);
-        } else {
-          warn('Pas de token Nagra dans customData — VOD sans DRM ou live non protege');
+        var media = request.media;
+        if (!media) { warn('media null'); return request; }
+
+        var contentId  = media.contentId  || '';
+        var contentUrl = media.contentUrl || '';
+
+        log('contentId='   + contentId);
+        log('contentUrl='  + contentUrl);
+        log('streamType='  + media.streamType);
+        log('contentType=' + (media.contentType || '(vide)'));
+        log('customData='  + JSON.stringify(media.customData || {}).substring(0, 200));
+
+        // ── 1. Garantir contentUrl ─────────────────────────────────────────
+        // Bitmovin SDK met parfois l'URL dans contentId au lieu de contentUrl
+        if (!contentUrl && contentId && contentId.indexOf('http') === 0) {
+          media.contentUrl = contentId;
+          log('contentUrl forcé depuis contentId');
+        }
+        var url = (media.contentUrl || media.contentId || '').toLowerCase();
+
+        // ── 2. Garantir contentType ────────────────────────────────────────
+        // Shaka doit connaître le format pour parser le manifest correctement
+        if (!media.contentType || media.contentType === '') {
+          if (url.indexOf('.m3u8') !== -1) {
+            media.contentType = 'application/x-mpegURL';
+            log('contentType → application/x-mpegURL');
+          } else if (url.indexOf('.mpd') !== -1) {
+            media.contentType = 'application/dash+xml';
+            log('contentType → application/dash+xml');
+          }
         }
 
-        var contentId = (request.media && (request.media.contentId || request.media.contentUrl)) || '(inconnu)';
-        log('contentId=' + contentId);
+        // ── 3. Détecter et forcer streamType LIVE ─────────────────────────
+        //
+        // Bitmovin Android SDK n'inclut pas liveConfig dans le SourceConfig
+        // pour les streams HLS live sans DRM → streamType=BUFFERED (1) au lieu de LIVE (2)
+        // → Shaka tente de lire un live comme un VOD → erreur immédiate
+        //
+        // Sources de détection (ordre de fiabilité) :
+        //   A. customData['isLive'] === 'true'
+        //      → envoyé par buildNagraReceiverConfig() dans PlayerManager.kt
+        //   B. media.streamType déjà LIVE
+        //      → cas DRM où Bitmovin SDK le set correctement
+        //   C. Patterns URL TV5Monde
+        //      → filet de sécurité universel
+
+        var customData = media.customData || {};
+
+        var isLive = customData['isLive'] === 'true'                      // A
+          || media.streamType === cast.framework.messages.StreamType.LIVE  // B
+          || url.indexOf('/live/') !== -1                                   // C
+          || url.indexOf('channel(') !== -1;                               // C
+
+        if (isLive) {
+          media.streamType = cast.framework.messages.StreamType.LIVE;
+          log('streamType → LIVE ✅');
+        } else {
+          log('streamType → BUFFERED (VOD)');
+        }
+
+        // ── 4. Token Nagra (cas HLS + Widevine) ───────────────────────────
+        var token = customData['nv-authorizations'];
+        if (typeof token === 'string' && token.length > 0) {
+          nagraToken = token;
+          log('Token Nagra reçu ✅ longueur=' + nagraToken.length);
+        } else {
+          log('Pas de token Nagra (HLS clair)');
+        }
+
       } catch (e) {
-        warn('Erreur LOAD interceptor: ' + e.message);
+        warn('LOAD exception: ' + e.message);
       }
 
+      log('--- END LOAD ---');
       return request;
     }
   );
 
-  // ════════════════════════════════════════════════════════════════════════════
-  // 2. Custom message listener
-  //    Reçoit les messages envoyés via BitmovinCastManager.sendMessage() (Android)
-  //    Format : { "type": "nagra-drm-token", "nv-authorizations": "<token>" }
-  //    Utilisé pour : refresh du token (~4 min) et CastStarted
-  // ════════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════
+  // Custom message listener — refresh token Nagra
+  // Envoyé par sendNagraTokenToCastReceiverIfNeeded() (Android)
+  // Format : { "type": "nagra-drm-token", "nv-authorizations": "<token>" }
+  // ═══════════════════════════════════════════════════════════
   castContext.addCustomMessageListener(
     BITMOVIN_NAMESPACE,
     function (event) {
       try {
-        var message = (typeof event.data === 'string')
+        var msg = typeof event.data === 'string'
           ? JSON.parse(event.data)
           : event.data;
 
-        log('Custom message recu — type=' + message['type']);
-
-        if (message['type'] === 'nagra-drm-token' &&
-            typeof message['nv-authorizations'] === 'string') {
-          nagraToken = message['nv-authorizations'];
-          log('Token Nagra mis a jour via sendMessage ✅ longueur=' + nagraToken.length);
+        if (msg['type'] === 'nagra-drm-token'
+            && typeof msg['nv-authorizations'] === 'string') {
+          nagraToken = msg['nv-authorizations'];
+          log('Token Nagra rafraîchi ✅ longueur=' + nagraToken.length);
         }
       } catch (e) {
-        warn('Erreur parsing custom message: ' + e.message);
+        warn('Custom message exception: ' + e.message);
       }
     }
   );
 
-  // ════════════════════════════════════════════════════════════════════════════
-  // 3. Network API — injection du token Nagra dans les requêtes Widevine
-  //    Le CAFv3 expose setRequestHandler pour intercepter les requêtes réseau.
-  //    C'est ici qu'on injecte "nv-authorizations" dans les requêtes de licence.
-  // ════════════════════════════════════════════════════════════════════════════
-  playerManager.setRequestHandler(
-    cast.framework.messages.RequestType.LOAD,
-    null  // pas d'interception sur le manifest — uniquement sur les licences
-  );
-
-  /**
-   * Intercepte les requêtes de licence DRM Widevine côté CAFv3 natif.
-   * cast.framework.NetworkRequestType.LICENSE = requêtes Widevine/PlayReady
-   */
-  castContext.addEventListener(
-    cast.framework.system.EventType.READY,
-    function () {
-      log('Receiver pret (READY)');
-    }
-  );
-
-  // Injection Nagra via la Network Interceptor de Shaka (player natif CAFv3)
-  playerManager.addEventListener(
-    cast.framework.events.EventType.MEDIA_STATUS,
-    function (event) {
-      // L'événement MEDIA_STATUS confirme que le player a bien chargé la source
-      log('MEDIA_STATUS — playerState=' + (event.mediaStatus && event.mediaStatus.playerState));
-    }
-  );
-
-  /**
-   * setNetworkRequestHandler — injecte les headers Nagra dans chaque
-   * requête de licence Widevine émise par le player CAFv3 natif.
-   *
-   * cast.framework.NetworkRequestType.LICENSE couvre Widevine + PlayReady.
-   */
+  // ═══════════════════════════════════════════════════════════
+  // Network handler — injection Nagra dans les requêtes Widevine
+  // Actif uniquement pour les contenus avec DRM (cas 1)
+  // Pour HLS clair (cas 2 & 3) : nagraToken est null → handler passthrough
+  // ═══════════════════════════════════════════════════════════
   playerManager.setNetworkRequestHandler(
     cast.framework.NetworkRequestType.LICENSE,
     function (networkRequest) {
@@ -135,24 +156,31 @@
         networkRequest.headers['nv-authorizations'] = nagraToken;
         networkRequest.headers['Accept']             = 'application/octet-stream';
         networkRequest.headers['Content-Type']       = 'application/octet-stream';
-        log('Header Nagra injecte dans la requete Widevine ✅');
-      } else {
-        warn('Requete Widevine sans token Nagra — contenu sans DRM Nagra');
+        log('Nagra header injecté ✅');
       }
       return networkRequest;
     }
   );
 
-  // ════════════════════════════════════════════════════════════════════════════
-  // 4. Démarrage du receiver CAFv3
-  //    castContext.start() EST OBLIGATOIRE — sans ça le Chromecast ne répond
-  //    pas aux demandes de connexion du sender et le bouton Cast ne trouve rien.
-  // ════════════════════════════════════════════════════════════════════════════
-  try {
-    castContext.start();
-    log('CAFv3 Receiver demarre ✅ (castContext.start() appele)');
-  } catch (e) {
-    warn('Erreur castContext.start(): ' + e.message);
-  }
+  // ═══════════════════════════════════════════════════════════
+  // Events debug
+  // ═══════════════════════════════════════════════════════════
+  castContext.addEventListener(cast.framework.system.EventType.READY, function () {
+    log('Receiver READY ✅');
+  });
+
+  playerManager.addEventListener(cast.framework.events.EventType.MEDIA_STATUS, function (e) {
+    log('MEDIA_STATUS playerState=' + (e.mediaStatus && e.mediaStatus.playerState));
+  });
+
+  playerManager.addEventListener(cast.framework.events.EventType.ERROR, function (e) {
+    warn('PLAYER ERROR code=' + (e.detailedErrorCode || '?') + ' reason=' + (e.reason || '?'));
+  });
+
+  // ═══════════════════════════════════════════════════════════
+  // Démarrage — OBLIGATOIRE
+  // ═══════════════════════════════════════════════════════════
+  castContext.start();
+  log('CAFv3 Receiver démarré ✅');
 
 })();
