@@ -15,7 +15,7 @@ var TV5MondeReceiver = (function () {
   // ─── Namespace custom pour les messages Android → receiver ─────────────────
   var CUSTOM_NAMESPACE = 'urn:x-cast:com.bitmovin.player.caf';
 
-  // ─── Constructeur ───────────────────────────────────────────────────────────
+ 
   function TV5MondeReceiver() {
     var self = this;
 
